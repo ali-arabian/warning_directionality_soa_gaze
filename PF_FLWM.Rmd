@@ -1,0 +1,211 @@
+---
+title: "Untitled"
+author: "Ali Arabian"
+date: "2025-04-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+In the following chunk, I will load the packages I will use in the analysis.
+
+## Packages
+
+```{r cars}
+library(here)
+library(ggplot2)
+library(dplyr)
+library(emmeans)
+library(lme4)
+library(arm)
+library(viridis)
+library(performance)
+library(car)
+```
+
+Next, I will load the data.
+
+## Load data
+
+```{r}
+FLWM_P <- read.delim(here::here("GitHub/data/data.txt"))
+```
+
+
+Next, I will check for data distribution.
+
+```{r}
+############ Perform Shapiro-Wilk test##################
+shapiro_test_result_O <- shapiro.test(FLWM_P$FLWM)
+print(shapiro_test_result_O)
+
+#Data is not normally distributed.
+```
+
+In the next chunk, I will label the different types of warning direction; non-directional, towards_free_lane, and towards_hazard. "non_directional" is always when audio == 3. "towards_free_lane" is always when drive_Type == 1, and "towards_hazard" is always when drive_Type == 2.
+
+```{r}
+FLWM_P <- FLWM_P %>%
+  dplyr::mutate(warning_type = case_when(audio == 3 ~ "non_directional", # when audio is 3, it's non-directional
+                                              drive_Type == 1 ~ "towards_free_lane", # when driveType is 1, its towards_free_lane
+                                              drive_Type == 2 ~ "towards_hazard")) # when driveType is 2, it's towards_hazard
+
+```
+
+
+Next, I'll convert warning_type to a factor and standardized SOA. 
+
+```{r}
+FLWM_P$warning_type <- as.factor(FLWM_P$warning_type)  # It makes warning type a factor
+
+FLWM_P$soa_s <- scale(FLWM_P$soa, center = TRUE, scale = TRUE) # standardizing soa
+
+```
+
+## Model fitting
+
+Now we fit the model for the probability of glancing at the HSWM.
+
+```{r}
+
+
+model_FLWM_P <- glmer(FLWM ~ warning_type * soa_s + (1 | sub), 
+                         data = FLWM_P, 
+                         family = binomial(link = "logit"))
+
+summary(model_FLWM_P)
+# adding a calculation of an anova table 
+Anova(model_FLWM_P, type = "III")
+
+```
+
+Now calculate for multicollinearity 
+```{r}
+check_collinearity (model_FLWM_P)
+```
+
+
+Now, we calculate the average effect of warning type when averaging over SOA.
+
+```{r}
+## calculating average marginal effects for warning type for average SOA
+model_FLWM_P %>% 
+  emmeans(~ warning_type,
+          epred = TRUE) %>%
+  regrid() # convert to response scale
+```
+Now we can compute a contrast between levels of warning types
+
+```{r}
+## calculating 
+model_FLWM_P %>% 
+  emmeans(~ warning_type,
+          epred = TRUE) %>% 
+  regrid() %>% # convert to response scale
+  contrast(method = "pairwise") # performance contrasts
+```
+
+What is important to us is the interaction effect between warning types and SOA. Now, we estimate how SOA influences the probability of glancing on the FLWM for different warning types. Specifically, we examine whether the relationship between SOA and the probability of glancing on the FLWM differs between warning types by computing estimated trends (slopes).
+
+```{r}
+emtrends_results <- emtrends(model_FLWM_P, pairwise ~ warning_type, var = "soa_s")
+summary(emtrends_results, infer = TRUE)
+```
+To make interpretation easier, we compute the percentage change in odds ratio for every unit increase in SOA:
+
+```{r}
+
+# Calculate emtrends with pairwise comparisons
+emtrends_results <- emtrends(model_FLWM_P, pairwise ~ warning_type, var = "soa_s")
+
+# Extract slopes and compute percentage changes
+trend_summary <- summary(emtrends_results, infer = TRUE)$emtrends
+trend_summary <- trend_summary %>%
+  mutate(
+    # Odds ratio
+    odds_R = exp(soa_s.trend), 
+    # Change in odds ratio
+    change_OR = (exp(soa_s.trend) - 1),
+    # Percentage change in odds ratio
+    perc_change_OR = (exp(soa_s.trend) - 1) * 100,
+    # Percentage change in probability
+    perc_change_P = (exp(soa_s.trend) / (1 + exp(soa_s.trend))) * 100 
+  )
+# Print the trends with percentage changes and p-values
+print(trend_summary)
+
+```
+We now have our inference, it's time to plot
+
+Plot based on estimated mean and se.
+
+
+```{r}
+
+# Get scaling parameters (assuming soa_s was standardized)
+soa_vals <- c(0, 200, 400, 600)
+scaled_soa <- scale(soa_vals)
+center <- attr(scaled_soa, "scaled:center")
+scale_val <- attr(scaled_soa, "scaled:scale")
+
+# Get model estimates
+model_estimates <- emmeans(
+  model_FLWM_P,
+  specs = ~ warning_type * soa_s,
+  at = list(soa_s = (soa_vals - center)/scale_val),
+  type = "response"
+) %>% 
+  as.data.frame() %>%
+  mutate(
+    soa = factor(rep(soa_vals, each = 3), levels = c(0, 200, 400, 600)),
+    warning_type = factor(warning_type, 
+                         levels = c("towards_free_lane", "towards_hazard", "non_directional"))
+  )
+
+# Labels
+warning_labs <- c("Towards free lane", "Towards hazard", "Non-directional")
+names(warning_labs) <- c("towards_free_lane", "towards_hazard", "non_directional")
+
+# Create plot
+plot <- ggplot(model_estimates, aes(x = soa, y = prob, fill = warning_type)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.5), width = 0.5) +
+  geom_errorbar(
+    aes(ymin = asymp.LCL, ymax = asymp.UCL),
+    position = position_dodge(width = 0.5),
+    width = 0.25
+  ) +
+  scale_y_continuous(breaks = seq(0, 0.5, 0.1), limits = c(0, 0.5), name = "Probability of fixation to the FLWM") +
+  scale_x_discrete(name = "SOA (s)") +
+  labs(title = "Warning Direction") +
+  theme_minimal(base_size = 19) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 20),
+    axis.title = element_text(face = "bold", size = 16),
+    axis.text = element_text(size = 15, face = "bold"),
+    legend.position = "none",
+    panel.grid.major = element_blank(),  
+    panel.grid.minor = element_blank(),  
+    axis.line = element_line(linewidth = 1.2, color = "black"), 
+    axis.ticks = element_line(linewidth = 1.2), 
+    strip.text = element_text(size = 15, face = "bold")  
+  ) +
+  facet_wrap(~warning_type, labeller = labeller(warning_type = warning_labs))
+
+# Save plot
+ggsave(
+  filename = "C:/Users/tsaar/OneDrive - University of Leeds/PhD/Study3/Plots/PFFLWM_model_estimates.tiff",
+  plot = plot,
+  width = 10,
+  height = 5,
+  dpi = 300,
+  device = "tiff"
+)
+```
+
+
+ 

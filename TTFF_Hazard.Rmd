@@ -1,0 +1,460 @@
+---
+title: "Gaze data Analysis"
+author: "Ali Arabian"
+date: "2025-04-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In the following chunk, I will load the packages I will use in the analysis.
+
+## Packages
+
+```{r cars}
+library(here)
+library(ggplot2)
+library(dplyr)
+library(emmeans)
+library(lme4)
+library(arm)
+library(viridis)
+library(performance)
+library(car)
+library(moments)
+```
+
+Next, I will load the data.
+
+## Load data
+
+```{r}
+F_S <- read.delim(here::here("GitHub/data/data.txt"))
+```
+
+Next, I will replicate some of data cleaning i.e., removing NAs, which are trials without fixation on hazard. 
+## Data cleaning -  NAs
+
+
+```{r}
+# ------------------Remove NA from the data ------------------#
+TTFF_HLWM_S <- F_S %>%
+  dplyr::filter(!is.na(TTFF_HLWM))
+
+
+```
+
+
+Removing TTFF_HLWM of 0, which means drivers were already looking at the hazard position before it appears. This is because the binomial analysis showed no differences between the probability of TTFF_HLWM of 0 between warning direction ans soa.
+
+
+```{r}
+TTFF_HLWM_S <- TTFF_HLWM_S[TTFF_HLWM_S$TTFF_HLWM != 0, ]
+```
+
+Remove reactions more than 1 s. A fixation towards the hazard was defined as a fixation on the HLWM within the first second following the end of the occlusion period. During this period, the hazard (a truck) was visible in the HLWM before appearing on the main screen. These changes in visibility were driven by the truck’s motion as it overtook the ego vehicle at a speed of 70 mph. This one-second period was critical for early hazard detection, indicating whether directional warnings and the presence of SOA effectively result in faster hazard detection. 
+
+```{r}
+TTFF_HLWM_S <- TTFF_HLWM_S[TTFF_HLWM_S$TTFF_HLWM < 1, ]
+```
+
+
+Next, I will check for data distribution. 
+
+```{r}
+############ Perform Shapiro-Wilk test##################
+shapiro_test_result_O <- shapiro.test(TTFF_HLWM_S$TTFF_HLWM)
+print(shapiro_test_result_O)
+
+ggplot(TTFF_HLWM_S, aes(x = TTFF_HLWM)) +
+  geom_histogram(binwidth = 0.1, color = "black", fill = "blue") +
+  labs(title = "Distribution of TTFF_HLWM", x = "Time To First Fixation", y = "Frequency")
+#Data is not normally distributed.
+```
+
+
+In this next chunk, I will label the different types of warning direction; non-directional, towards free lane, and towards hazard. "non_directional" is always when audio == 3. "towards_free_lane" is always when drive_Type == 1, and "towards_hazard" is always when drive_Type == 2.
+
+```{r}
+TTFF_HLWM_S <- TTFF_HLWM_S %>%
+  dplyr::mutate(warning_type = case_when(audio == 3 ~ "non_directional", # when audio is 3, it's non-directional
+                                              drive_Type == 1 ~ "towards_free_lane", # when driveType is 1, its towards free lane
+                                              drive_Type == 2 ~ "towards_hazard")) # when driveType is 2, it's towards hazard
+
+```
+
+
+
+Next, I'll convert warning type to a factor and standardized SOA.  
+
+```{r}
+TTFF_HLWM_S$warning_type <- as.factor(TTFF_HLWM_S$warning_type)  # It makes warning type a factor
+TTFF_HLWM_S$soa_s <- scale(TTFF_HLWM_S$soa, center = TRUE, scale = TRUE) # standardizing soa
+```
+
+
+# Model fitting
+
+Now we fit the model for reaction time to first fixation on hazard.
+
+```{r}
+model_TTFF_HLWM_S <- glmer(TTFF_HLWM ~ warning_type * soa_s + (1 | sub), 
+                     data = TTFF_HLWM_S, family = Gamma(link = "log"))
+
+summary(model_TTFF_HLWM_S)
+
+# adding a calculation of an anova table 
+Anova(model_TTFF_HLWM_S, type = "III")
+
+```
+
+Now calculate for multicollinearity 
+```{r}
+check_collinearity (model_TTFF_HLWM_S)
+```
+
+Now, we calculate the average effect of warning type when averaging over SOA.
+
+```{r}
+## calculating average marginal effects for warning type for average SOA
+model_TTFF_HLWM_S %>% 
+  emmeans(~ warning_type,
+          epred = TRUE) %>%
+  regrid() # convert to response scale
+```
+
+Now we can compute a contrast between levels of warning types
+
+```{r}
+## calculating 
+model_TTFF_HLWM_S %>% 
+  emmeans(~ warning_type,
+          epred = TRUE) %>% 
+  regrid() %>% # convert to response scale
+  contrast(method = "pairwise") # performance contrasts
+```
+
+What is important to us is the interaction effect between warning types and SOA. Now, we estimate how SOA influences TTFF_HLWM for different warning types. Specifically, we examine whether the relationship between SOA and TTFF_HLWM differs between warning types by computing estimated trends (slopes).
+
+```{r}
+emtrends_results <- emtrends(model_TTFF_HLWM_S, pairwise ~ warning_type, var = "soa_s")
+summary(emtrends_results, infer = TRUE)
+```
+
+```{r}
+
+# Extract slopes and compute percentage changes
+trend_summary <- summary(emtrends_results, infer = TRUE)$emtrends
+trend_summary <- trend_summary %>%
+  mutate(
+    TTFF_HLWM_change_s = (exp(soa_s.trend) - 1 ), # Convert log slopes to reaction time (s)
+    TTFF_HLWM_perc_change = (exp(soa_s.trend) - 1 ) * 100  #percentage change of reaction time
+  )
+
+# Print the trends with percentage changes and p-values
+print(trend_summary)
+```
+
+
+Now we have our inference, it's time to plot.
+
+```{r}
+# Reorder the levels of warning_type
+TTFF_HLWM_S$warning_type <- factor(TTFF_HLWM_S$warning_type, levels = c("towards_free_lane", "towards_hazard", "non_directional"))
+# labels
+warning_labs <- c("Towards free lane", "Towards hazard", "Non-directional")
+names(warning_labs) <- c("towards_free_lane", "towards_hazard", "non_directional")
+
+
+# Compute means by SOA and Warning Type
+mean_data <- TTFF_HLWM_S %>%
+  group_by(warning_type, soa) %>%
+  summarise(mean_TTFF_HLWM = mean(TTFF_HLWM, na.rm = TRUE))
+
+# Create the plot
+p <- ggplot(TTFF_HLWM_S, aes(x = factor(soa), y = TTFF_HLWM)) +
+  
+  # Violin plot with quantiles
+  geom_violin(fill = "skyblue", color = "black", alpha = 0.8, draw_quantiles = c(0.25, 0.5, 0.75)) +
+  
+  # Jitter points for individual observations
+  geom_jitter(width = 0.2, color = "red", alpha = 0.5, size = 1.2) +
+  
+  # Mean points with a legend
+  stat_summary(fun = mean, aes(color = "Mean"), geom = "point", size = 3, shape = 18) +
+  
+  # Line plot for mean values
+  geom_line(data = mean_data, aes(x = factor(soa), y = mean_TTFF_HLWM, group = warning_type, color = warning_type), 
+            linewidth = 0.8, linetype = "dashed", color = "#3b3b3b") + 
+  
+  # Customize the plot
+  labs(title = "Warning Direction", 
+       x = "SOA",
+       y = "Time to First Fixation on Hazard (s)",
+       color = "Statistics") +  
+  theme_minimal(base_size = 15) +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 20),
+    axis.title = element_text(face = "bold", size = 17),  # Reduced axis title size
+    axis.text = element_text(size = 14, face = "bold"),   # Reduced x and y axis text size
+    legend.position = "right",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 18),  # Slightly reduced legend text size
+    panel.grid.major = element_line(color = "grey80"),
+    panel.grid.minor = element_line(color = "grey90"),
+    strip.text = element_text(face = "bold", size = 17)  # Adjusted facet text size
+  ) +
+
+  # Set legend colors
+  scale_color_manual(values = c("Mean" = "blue", "warning_type" = "red")) +
+  
+  # Ensure y-axis starts at 0
+  expand_limits(y = 0) +
+  
+  # Facet by warning type
+  facet_wrap(~warning_type, labeller = labeller(warning_type = warning_labs)) +
+  # Adjust facet strip text size in theme
+  theme(strip.text = element_text(face = "bold", size = 15))
+
+# Save the plot as a .tiff file
+ggsave(filename = "C:/Users/tsaar/OneDrive - University of Leeds/PhD/Study3/Plots/TTFF_HLWM_S.tiff", plot = p, width = 10, height = 7, dpi = 300, device = "tiff")
+```
+This is nice, but a couple of things to note. The line added with geom_line is not a line of best fit for the mean value - it simply joins them up. Instead, we can use our model to plot the predicted mean, and see how well this fits the sample averages. 
+
+## Extracting model estimates - create some data
+
+To generate predictions from the model, we first need to create some data. For the purposes of plotting, we want a dataframe that contains a range of SOAs, within each warning type. We need to scale SOA in the new data because we did this for the sample.
+
+Note: I have made the range of SOAs from -100 to 700. SOAs include 0, 200, 400, and 600. This is merely for plotting reason. A -100 ms SOA doesn't make much sense; a 700 ms does make sense and might be useful to know. But I use this range to make it easier to see the plotted average. 
+
+```{r}
+# create empty dataframe
+new_data <- expand.grid(soa = seq(-100, 700, length.out = 100),
+                        warning_type = c("non_directional", "towards_free_lane", "towards_hazard")) %>%
+  dplyr::mutate(soa_s = scale(soa, center = TRUE, scale = TRUE)) # creating standardised 
+  
+```
+
+Now we use that data and the model to predict TTFF_HLWMs for each level of warning type and SOA and save it to a new data frame
+
+```{r}
+new_rt_data <- data.frame(rt = predict(model_TTFF_HLWM_S, re.form = NA, newdata = new_data)) %>%
+  dplyr::bind_cols(new_data) 
+```
+
+
+Now lets produce an example plot with model estimates and the raw data. In geom_line(), we average our predictions, us the exp() function the results (predictions are on the log scale) and there we have it! Model predictions of the change in first steering time as a function of SOA and warning type.
+
+```{r}
+ggplot() +
+  geom_point(TTFF_HLWM_S %>%
+               group_by(warning_type, soa) %>%
+               summarise(mean_TTFF_HLWM = mean(TTFF_HLWM, na.rm = TRUE)), mapping = aes(x = soa, y = mean_TTFF_HLWM), col = "red") + 
+  geom_point(TTFF_HLWM_S, mapping = aes(x = soa, y = TTFF_HLWM), position = position_jitter(width = 20), alpha = .1) +
+  geom_line(data = new_rt_data %>%
+              dplyr::group_by(warning_type, soa) %>%
+              dplyr::summarise(estimate = mean(rt)), mapping = aes(x = soa, y = exp(estimate))) +
+    geom_point(TTFF_HLWM_S %>%
+               group_by(warning_type, soa) %>%
+               summarise(mean_TTFF_HLWM = mean(TTFF_HLWM, na.rm = TRUE)), mapping = aes(x = soa, y = mean_TTFF_HLWM), col = "red") + 
+  facet_wrap(~ warning_type) +
+  xlab("SOA (ms)") +
+  ylab("TTFF on the Hazard (s)")
+```
+
+## Adding confidence intervals
+
+But we can keep going. An average on it's own it not much use; we need to add confidence intervals. This is a little bit involved with GLMMs, but one work around is to generate simulations of the model, and the calculate the upper and lower quantiles. I do this below.
+
+```{r}
+sims <- sim(model_TTFF_HLWM_S, n.sims = 1000) # 1 simulate plausible parameter values
+
+fs <- fixef(sims)  # 2 save fixed effects from the simulations
+
+Xmat <- model.matrix(~ 1 + warning_type * soa_s, data = new_data) # 3 create a model matrix 
+
+fitmat <- matrix(ncol = nrow(fs), nrow = nrow(new_data)) # 4 create a matrix for fitted for values
+
+for (i in 1:nrow(fs)) {
+  fitmat[, i] <- Xmat %*% as.matrix(fs)[i, ]
+} # 5 calculated fitted values for each combination of predictor values, for each combination of plausible parameter avlues
+new_rt_data$lower <- apply(fitmat, 1, quantile, prob = 0.05) # 6 calculate quantiles
+new_rt_data$median <- apply(fitmat, 1, quantile, prob = 0.5) # 6 calculate quantiles
+new_rt_data$upper <- apply(fitmat, 1, quantile, prob = 0.95) # 6 calculate quantiles
+```
+
+Now we have added quantiles to the dataframe, we can plot these as confidence intervals around our average prediction. I use geom_ribbon to plot the confidence intervals
+
+```{r}
+ggplot() +
+  geom_point(data = TTFF_HLWM_S %>% 
+               group_by(warning_type, soa) %>% 
+               summarise(mean_TTFF_HLWM = mean(TTFF_HLWM, na.rm = TRUE), .groups = "drop"), 
+             mapping = aes(x = soa, y = mean_TTFF_HLWM), col = "red") + 
+  geom_point(data = TTFF_HLWM_S, 
+             mapping = aes(x = soa, y = TTFF_HLWM), 
+             position = position_jitter(width = 20), alpha = .1) +
+  geom_line(data = new_rt_data %>%
+              dplyr::group_by(warning_type, soa) %>%
+              dplyr::summarise(estimate = mean(rt), .groups = "drop"), 
+            mapping = aes(x = soa, y = exp(estimate))) +
+  geom_ribbon(data = new_rt_data %>%
+                dplyr::group_by(warning_type, soa) %>%
+                dplyr::summarise(estimate = mean(rt), 
+                                 lower = mean(lower), 
+                                 upper = mean(upper), .groups = "drop"), 
+              mapping = aes(x = soa, y = exp(estimate), ymin = exp(lower), ymax = exp(upper)), alpha = .3) +
+  facet_wrap(~ warning_type) +
+  xlab("SOA (ms)") +
+  ylab("TTFF on the Hazard (s)")
+```
+
+And not for the final plot. 
+
+```{r}
+
+library(viridisLite)
+
+warning_labs <- c(
+  "non_directional" = "Non-directional",
+  "towards_free_lane" = "Towards Free Lane", 
+  "towards_hazard" = "Towards Hazard"
+)
+
+ggplot() +
+  # Mean TTFF_HLWM per SOA (Red Points)
+  geom_point(data = TTFF_HLWM_S %>%
+               group_by(warning_type, soa) %>%
+               summarise(mean_TTFF_HLWM = mean(TTFF_HLWM, na.rm = TRUE), .groups = "drop"),
+             mapping = aes(x = soa, y = mean_TTFF_HLWM), col = "red") + 
+  
+  # Individual TTFF_HLWM points (Jittered)
+  geom_point(data = TTFF_HLWM_S, 
+             mapping = aes(x = soa, y = TTFF_HLWM, col = warning_type), 
+             position = position_jitter(width = 20), alpha = .1) +
+  
+  # Estimated Line from Model
+  geom_line(data = new_rt_data %>%
+              group_by(warning_type, soa) %>%
+              summarise(estimate = mean(rt), .groups = "drop"),
+            mapping = aes(x = soa, y = exp(estimate))) +
+  
+  # Confidence Ribbon
+  geom_ribbon(data = new_rt_data %>%
+                group_by(warning_type, soa) %>%
+                summarise(estimate = mean(rt), 
+                          lower = mean(lower), 
+                          upper = mean(upper), 
+                          .groups = "drop"),
+              mapping = aes(x = soa, y = exp(estimate), ymin = exp(lower), ymax = exp(upper)), 
+              alpha = .3) +
+
+  # Facet by Warning Type with Custom Labels
+  facet_wrap(~ warning_type, labeller = labeller(warning_type = warning_labs)) +
+
+  # Custom Colors
+  scale_colour_manual(values = viridis(4)[1:3]) +
+
+  # Labels & Theme Adjustments
+  xlab("SOA (ms)") +
+  ylab("TTFF on the Hazard (s)") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_text(size = 11),
+    axis.text.x = element_text(size = 11),
+    axis.title.y = element_text(size = 11),
+    axis.text.y = element_text(size = 8, face = "bold"),
+    title = element_text(size = 18),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    legend.key = element_blank(),
+    legend.key.width = unit(0.3, 'cm'),
+    legend.key.size = unit(0.1, 'cm'),
+    plot.title = element_text(size = 15, face = "bold"),
+    strip.text = element_text(face = "bold", size = 10)
+  )
+
+
+```
+
+
+I also save as a .tiff file, which is what a lot of journals ask for. 
+
+```{r}
+# Reorder the levels of warning_type
+TTFF_HLWM_S$warning_type <- factor(TTFF_HLWM_S$warning_type, levels = c("towards_free_lane", "towards_hazard", "non_directional"))
+new_rt_data$warning_type <- factor(new_rt_data$warning_type, levels = c("towards_free_lane", "towards_hazard", "non_directional"))
+
+library(ggplot2)
+library(dplyr)
+library(viridisLite)
+
+TTFF_HLWM_S_plot <- ggplot() +
+  # Mean TTFF_HLWM per SOA (Red Points)
+  geom_point(data = TTFF_HLWM_S %>%
+               group_by(warning_type, soa) %>%
+               summarise(mean_TTFF_HLWM = mean(TTFF_HLWM, na.rm = TRUE), .groups = "drop"),
+             mapping = aes(x = soa, y = mean_TTFF_HLWM), col = "red", size = 0.7) + 
+  
+  # Individual TTFF_HLWM points (Jittered)
+  geom_point(data = TTFF_HLWM_S, 
+             mapping = aes(x = soa, y = TTFF_HLWM, col = warning_type), 
+             position = position_jitter(width = 30), alpha = .1) +
+  
+  # Estimated Line from Model
+  geom_line(data = new_rt_data %>%
+              group_by(warning_type, soa) %>%
+              summarise(estimate = mean(rt), .groups = "drop"),
+            mapping = aes(x = soa, y = exp(estimate))) +
+  
+  # Confidence Ribbon
+  geom_ribbon(data = new_rt_data %>%
+                group_by(warning_type, soa) %>%
+                summarise(estimate = mean(rt), 
+                          lower = mean(lower), 
+                          upper = mean(upper), 
+                          .groups = "drop"),
+              mapping = aes(x = soa, y = exp(estimate), ymin = exp(lower), ymax = exp(upper)), 
+              alpha = .3) +
+
+  # Facet by Warning Type with Custom Labels
+  facet_wrap(~ warning_type, labeller = labeller(warning_type = warning_labs)) +
+
+  # Custom Colors
+  scale_colour_manual(values = viridis(4)[1:3]) +
+
+  # Custom x-axis labels
+  scale_x_continuous(breaks = c(0, 200, 400, 600), labels = c("0", "200", "400", "600")) +
+
+  # Labels & Theme Adjustments
+  xlab("SOA (ms)") +
+  ylab("TTFF on the hazard (s)") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_text(size = 11),
+    axis.text.x = element_text(size = 11),
+    axis.title.y = element_text(size = 11),
+    axis.text.y = element_text(size = 8, face = "bold"),
+    title = element_text(size = 18),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    legend.key = element_blank(),
+    legend.key.width = unit(0.3, 'cm'),
+    legend.key.size = unit(0.1, 'cm'),
+    plot.title = element_text(size = 15, face = "bold"),
+    strip.text = element_text(face = "bold", size = 10)
+  )
+
+# Save plot
+ggsave("C:/Users/tsaar/OneDrive - University of Leeds/PhD/Study3/Plots/TTFF_hazard_S_GLMM.tiff", 
+       plot = TTFF_HLWM_S_plot, width = 16, height = 8, units = 'cm', dpi = 300, device = "tiff")
+
+```
+
+
